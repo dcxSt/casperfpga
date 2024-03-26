@@ -596,25 +596,25 @@ class SnapAdc(object):
 
         E.g.
         .. code-block:: python
-            testPatterns(taps=True) # Return lane-wise std of all ADCs, taps=range(32)
-            testPatterns(0,taps=range(32))
+            test_patterns(taps=True) # Return lane-wise std of all ADCs, taps=range(32)
+            test_patterns(0,taps=range(32))
                         # Return lane-wise std of the 1st ADC
-            testPatterns([0,1],2)   # Return lane-wise std of the first two ADCs 
+            test_patterns([0,1],2)   # Return lane-wise std of the first two ADCs 
                         # with tap = 2
-            testPatterns(1, taps=[0,2,3], mode='std')
+            test_patterns(1, taps=[0,2,3], mode='std')
                         # Return lane-wise stds of the 2nd ADC with
                         # three different tap settings
-            testPatterns(2, mode='err', pattern1=0b10101010)
+            test_patterns(2, mode='err', pattern1=0b10101010)
                         # Check the actual data against the given test
                         # pattern without changing current delay tap
                         # setting and return lane-wise error counts of
                         # the 3rd ADC,
-            testPatterns(2, mode='err', pattern1=0b10101010, pattern2=0b01010101)
+            test_patterns(2, mode='err', pattern1=0b10101010, pattern2=0b01010101)
                         # Check the actual data against the given alternate
                         # test pattern without changing current delay tap
                         # setting and return lane-wise error counts of
                         # the 3rd ADC,
-            testPatterns(mode='ramp')
+            test_patterns(mode='ramp')
                         # Check all ADCs under ramp mode
 
         """
@@ -685,15 +685,15 @@ class SnapAdc(object):
         if mode not in MODE:
             raise ValueError("Invalid parameter")
 
-        self.select_adc(chipSel)
+        self.selectADC(chipSel)
         if mode=='ramp':        # ramp mode
-            self.controller.test('en_ramp')
+            self.adc.test('en_ramp')
             taps=None
             pattern1=None
             pattern2=None
         elif pattern1==None and pattern2==None:
             # synchronization mode
-            self.controller.test('pat_sync')
+            self.adc.test('pat_sync')
             # pattern1 = 0b11110000 when self.resolution is 8
             # pattern1 = 0b111111000000 when self.resolution is 12
             pattern1 = ((2 ** (self.resolution // 2)) - 1) << (self.resolution // 2)
@@ -701,19 +701,19 @@ class SnapAdc(object):
         elif isinstance(pattern1,int) and pattern2==None:
             # single pattern mode
 
-            if type(self.controller) is HMCAD1520:
+            if type(self.adc) is HMCAD1520:
                 # test patterns of HMCAD1520 need special cares
                 ofst = 16 - self.resolution
                 reg_p1 = pattern1 << ofst
             else:
                 reg_p1 = pattern1
 
-            self.controller.test('single_custom_pat', reg_p1)
+            self.adc.test('single_custom_pat', reg_p1)
             pattern1 = self._signed(pattern1, self.resolution)
         elif isinstance(pattern1,int) and isinstance(pattern2,int):
             # dual pattern mode
 
-            if type(self.controller) is HMCAD1520:
+            if type(self.adc) is HMCAD1520:
                 # test patterns of HMCAD1520 need special cares
                 ofst = 16 - self.resolution
                 reg_p1 = pattern1 << ofst
@@ -722,7 +722,7 @@ class SnapAdc(object):
                 reg_p1 = pattern1
                 reg_p2 = pattern2
 
-            self.controller.test('dual_custom_pat', reg_p1, reg_p2)
+            self.adc.test('dual_custom_pat', reg_p1, reg_p2)
             pattern1 = self._signed(pattern1, self.resolution)
             pattern2 = self._signed(pattern2, self.resolution)
         else: 
@@ -754,7 +754,7 @@ class SnapAdc(object):
 
         if taps == None:
             self.snapshot()
-            results = [_check(self.read_ram(cs)) for cs in chipSel]
+            results = [_check(self.readRAM(cs)) for cs in chipSel]
             results = np.array(results).reshape(len(chipSel),len(self.laneList)).tolist()
             results = dict(zip(chipSel,results))
             for cs in chipSel:
@@ -763,14 +763,14 @@ class SnapAdc(object):
             for tap in taps:
                 self.delay(tap, chipSel)
                 self.snapshot()
-                results += [_check(self.read_ram(cs)) for cs in chipSel]
+                results += [_check(self.readRAM(cs)) for cs in chipSel]
             results = np.array(results).reshape(-1,len(chipSel),len(self.laneList))
             results = np.einsum('ijk->jik',results).tolist()
             results = dict(zip(chipSel,results))
             for cs in chipSel:
                 results[cs] = dict(zip(taps,[np.array(row) for row in results[cs]]))
         
-        self.controller.test('off')
+        self.adc.test('off')
 
         if len(chipSel) == 1:
             return results[chipSel[0]]
@@ -918,7 +918,7 @@ class SnapAdc(object):
         return {} # success
 
     def isLineClockAligned(self):
-        errs = self.testPatterns(mode='std',pattern1=self.p1,pattern2=self.p2)
+        errs = self.test_patterns(mode='std',pattern1=self.p1,pattern2=self.p2)
 
         if np.all(np.array([list(adc.values()) for adc in errs.values()])==0):
             logger.info('Line clock of all ADCs aligned.')
@@ -973,7 +973,7 @@ class SnapAdc(object):
         return failed_chips
 
     def isFrameClockAligned(self):
-        errs = self.testPatterns(mode='err',pattern1=self.p1,pattern2=self.p2)
+        errs = self.test_patterns(mode='err',pattern1=self.p1,pattern2=self.p2)
 
         if all(all(val==0 for val in adc.values()) for adc in errs.values()):
             logger.info('Frame clock of all ADCs aligned.')
