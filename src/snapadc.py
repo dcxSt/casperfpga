@@ -286,11 +286,38 @@ class SnapAdc(object):
         else:
             self.clksw.setSwitch('b')
 
-        # Snipped off ADC calibration here; it's now in
-        # snap_fengine.
+        # Snipped off ADC calibration here: [Why??]
+        # It's now snap_fengine. [What is snap_fengine?]
+        # Despite above comments someone made about putting these checks
+        # into the mysterious 'snap_fengine', I've put the calibration 
+        # checks back in through ADC_calibration
+        assert self.ADC_calibration(numChannel), "ADC not callibrated"
         self._retry_cnt = 0
         self.working_taps = {} # initializing invalidates cached values
         return
+
+    def ADC_calibration(self, numChannel:int):
+        """Perform checks and align clocks
+
+        Call this method after init()
+
+        :param int numChannel: Number of channels for ADC to use (?)
+        :return bool: True if well calibrated and passes tests
+        :raises Error: If not well calibrated
+        """
+        self.setDemux(numChannel=1) # Temporarily set to 1, full interleave mode
+        assert self.getWord('ADC16_LOCKED')==1, "ADC not locked"
+        self.alignLineClock()
+        assert self.isLineClockAligned() is True, "ADC Line Clock not aligned"
+        self.alignFrameClock()
+        assert self.isFrameClockAligned() is True, "ADC Frame Clock not aligned"
+        # Test patterns: ramp
+        adc_errs = self.test_patterns(mode='ramp')
+        assert np.all(np.array([
+                list(adc.values()) for adc in adc_errs.values()
+            ])==0), "SNAP ADC failed ramp test"
+        self.setDemux(numChannel) # Set back to proper value
+        return True
 
     def selectADC(self, chipSel=None):
         """ Select one or multiple ADCs
