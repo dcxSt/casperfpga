@@ -3,7 +3,7 @@ future
 katcp
 numpy
 odict
-tornado
+tornado==4.4
 redis
 tftpy
 progressbar2
