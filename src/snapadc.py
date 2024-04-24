@@ -123,7 +123,7 @@ class SnapAdc(object):
 
         self.clksw = HMC922(host,'adc16_use_synth')
         self.ram = [WishBoneDevice(host,name) for name in self.ramList]
-        ADC='HMCAD1511'
+        #ADC='HMCAD1511'
         if ADC not in ['HMCAD1511','HMCAD1520']:
             raise ValueError("Invalid parameter")
 
