@@ -438,7 +438,7 @@ class SnapAdc(object):
             return dict(zip(ram, data))
         elif ram in self.adcList:
             if self.resolution > 8:     # ADC_DATA_WIDTH  == 16
-                fmt = '!1024' + ('h' if signed else 'B')
+                fmt = '!1024' + ('h' if signed else 'H')
                 length = 2048
             else:
                 fmt = '!1024' + ('b' if signed else 'B') 
