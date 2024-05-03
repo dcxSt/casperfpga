@@ -286,12 +286,24 @@ class SnapAdc(object):
         else:
             self.clksw.setSwitch('b')
 
-        # Snipped off ADC calibration here: [Why??]
-        # It's now snap_fengine. [What is snap_fengine?]
-        # Despite above comments someone made about putting these checks
-        # into the mysterious 'snap_fengine', I've put the calibration 
-        # checks back in through ADC_calibration
-        assert self.ADC_calibration(numChannel), "ADC not callibrated"
+        # Calling ADC calibration here can lead to infinit try-catch loop 
+        # (behaviour only observed in 12bit mode)
+        #
+        ## Snipped off ADC calibration here: [Why??]
+        ## It's now snap_fengine. [What is snap_fengine?]
+        ##
+        ## Despite above comments someone made about putting these checks
+        ## into the mysterious 'snap_fengine', I've put the calibration 
+        ## checks back in through ADC_calibration
+        ##
+        ## I re-commented it because of infinite try-catch loop that 
+        ## occurs as init() gets called from _find_working_taps() which
+        ## is called in alignLineClock() which is called in 
+        ## ADC_calibration(); This looping behaviour has only been 
+        ## observed in 12bit mode. I'm now calling ADC_callibration()
+        ## in higher level code, right after snap_adc.init().
+        ## 
+        #assert self.ADC_calibration(numChannel), "ADC not callibrated"
         self._retry_cnt = 0
         self.working_taps = {} # initializing invalidates cached values
         return
