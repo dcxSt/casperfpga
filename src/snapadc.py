@@ -88,7 +88,8 @@ class SnapAdc(object):
         try:
             self.resolution  = int(self.device_info['adc_resolution'])
             self.sample_rate = float(self.device_info['sample_rate'])
-            self.num_channel = int(self.device_info['snap_inputs'])
+            self.num_snap_inputs = int(self.device_info['snap_inputs']) # Total number of inputs in a snap board, 3, 6, or 12
+            self.numChannel = self.num_snap_inputs // 3 # Number of input channels per ADC chip, there are three HMCAD15xx chips on each snap board
         except:
             print(self.device_info)
             raise
@@ -164,7 +165,7 @@ class SnapAdc(object):
         self._retry_wait = kwargs.get('retry_wait',1)
 
         if initialize:
-            self.init(sample_rate=self.sample_rate, num_channel=self.num_channel)
+            self.init(sample_rate=self.sample_rate, numChannel=self.numChannel)
 
     def set_gain(self, gain):
         """
