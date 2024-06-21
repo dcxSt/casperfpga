@@ -159,6 +159,7 @@ class SnapAdc(object):
         self.clock_divide    = 1
         self.host = host # the SNAPADC class doesn't directly expose this
         self.working_taps = {}
+        self.selected_taps = {} # keys are chips (0, 1, or 2), values are ints within working_taps dict
         self._retry_cnt = 0
         self._retry = kwargs.get('retry',20)
         self._retry_wait = kwargs.get('retry_wait',1)
@@ -305,7 +306,7 @@ class SnapAdc(object):
         ##
         ## I re-commented it because of infinite try-catch loop that 
         ## occurs as init() gets called from _find_working_taps() which
-        ## is called in alignLineClock() which is called in 
+        ## is called in align_line_clock() which is called in 
         ## ADC_calibration(); This looping behaviour has only been 
         ## observed in 12bit mode. I'm now calling ADC_callibration()
         ## in higher level code, right after snap_adc.init().
@@ -313,30 +314,60 @@ class SnapAdc(object):
         #assert self.ADC_calibration(numChannel), "ADC not callibrated"
         self._retry_cnt = 0
         self.working_taps = {} # initializing invalidates cached values
+        self.selected_taps = {} # keys are chips (0, 1, or 2), values are ints within working_taps dict
         return
 
-    def ADC_calibration(self):
-        """Perform checks and align clocks
-
-        Call this method after init()
-
-        :param int numChannel: Number of channels for ADC to use (?)
-        :return bool: True if well calibrated and passes tests
-        :raises Error: If not well calibrated
+    def calibrate_ADCs(self, adc_chip_sel=[0,1,2], ker_size=5):
         """
+        Calibrate specified ADCs
+
+        adc_chip_sel : int or tuple, Select which ADC chip(s) to callibrate
+            chips must be in (0,1,2) or a subset thereof
+        """
+        if isinstance(adc_chip_sel, int):
+            adc_chip_sel = [adc_chip_sel]
+        elif not set(adc_chip_sel).issubset({0,1,2}):
+            raise ValueError("Invalid ADC chip selection")
         self.setDemux(numChannel=1) # Temporarily set to 1, full interleave mode
-        assert self.getWord('ADC16_LOCKED')==1, "ADC not locked"
-        self.alignLineClock(ker_size=5)
-        assert self.isLineClockAligned() is True, "ADC Line Clock not aligned"
-        self.alignFrameClock()
-        assert self.isFrameClockAligned() is True, "ADC Frame Clock not aligned"
-        # Test patterns: ramp
-        adc_errs = self.test_patterns(mode='ramp')
-        assert np.all(np.array([
-                list(adc.values()) for adc in adc_errs.values()
-            ])==0), "SNAP ADC failed ramp test"
-        self.setDemux(self.numChannel) # Set back to proper value
-        return True
+        self.logger.info('ADC Calibration Stage 1: Align bit/line-clock')
+        self._find_working_taps(self, ker_size=ker_size, adc_chip_sel=adc_chip_sel, maxtries=1) # populate self.working_taps
+        # Alert the user of any defective chips
+        for chip in (0,1,2):
+            if len(self.working_taps[chip])==0:
+                self.logger.warning(f'No working taps found for chip {chip}')
+        # Pick taps at random of the ones that passed the test, only for adc_chip_sel
+        self.selected_taps = {chip:int(np.random.choice(self.working_taps[chip])) for chip in adc_chip_sel}
+
+        self.logger.info('ADC Calibration Stage 2: Align word/frame-clock')
+        self.align_frame_clock()
+
+        self.logger.info('ADC Calibration Stage 3: Ramp test')
+        self.ramp_test() # TODO: write this method
+
+        return 
+
+    #def ADC_calibration(self):
+    #    """Perform checks and align clocks
+
+    #    Call this method after init()
+
+    #    :param int numChannel: Number of channels for ADC to use (?)
+    #    :return bool: True if well calibrated and passes tests
+    #    :raises Error: If not well calibrated
+    #    """
+    #    self.setDemux(numChannel=1) # Temporarily set to 1, full interleave mode
+    #    assert self.getWord('ADC16_LOCKED')==1, "ADC not locked"
+    #    self.align_line_clock(ker_size=5)
+    #    assert self.isLineClockAligned() is True, "ADC Line Clock not aligned"
+    #    self.alignFrameClock()
+    #    assert self.isFrameClockAligned() is True, "ADC Frame Clock not aligned"
+    #    # Test patterns: ramp
+    #    adc_errs = self.test_patterns(mode='ramp')
+    #    assert np.all(np.array([
+    #            list(adc.values()) for adc in adc_errs.values()
+    #        ])==0), "SNAP ADC failed ramp test"
+    #    self.setDemux(self.numChannel) # Set back to proper value
+    #    return True
 
     def selectADC(self, chipSel=None):
         """ Select one or multiple ADCs
@@ -575,8 +606,6 @@ class SnapAdc(object):
 
         tap = int(tap) # Fix for Py3
  
-        strl = ','.join([str(c) for c in laneSel])
-        strc = ','.join([str(c) for c in chipSel])
         logger.debug('Set DelayTap of lane {0} of chip {1} to {2}'
                 .format(str(laneSel),str(chipSel),tap))
 
@@ -900,15 +929,21 @@ class SnapAdc(object):
 
         return np.argmax(dist)
 
-    def _find_working_taps(self, ker_size=5, maxtries=5):
+    def _find_working_taps(self, ker_size=5, adc_chip_sel=[0,1,2], maxtries=1):
         '''Generate a dictionary of working tap values per chip/lane.
+        Populates self.working_taps with taps that are able to capture patterns reliably; 
+        the keys are chip numbers (0,1,2), the values are numpy arrays of taps. 
+
+        It will keep trying to find working taps for all chips maxtries times. 
+
         ker: size of convolutional kernel used as a stand-off from
-             marginal tap values. Default 7.'''
-        nchips, nlanes, ntaps = len(self.adcList), len(self.laneList), 32 # steve: what is this magic number 32 about? Answer: there are 32 taps with monotonically incereasing sub-clock delays between them.
+             marginal tap values. Default 7.
+        '''
+        nchips, ntaps = len(self.adcList), 32 # steve: what is this magic number 32 about? Answer: there are 32 taps with monotonically incereasing sub-clock delays between them.
         # Make sure we have enough taps to work with, otherwise reinit ADC
-        for cnt in range(maxtries):
+        for _ in range(maxtries):
             try:
-                for chip in self.adcList:
+                for chip in adc_chip_sel:
                     assert(self.working_taps[chip].size > 0)
                 return
             except(KeyError, AssertionError):
@@ -938,137 +973,211 @@ class SnapAdc(object):
                     # identify taps that work for all lanes of chip
                     taps = np.where(np.convolve(h[chip], ker, 'same') == ker_size)[0]
                     self.working_taps[chip] = taps
-        raise RuntimeError('Failed to find working taps.')
+        self.logger.error('Failed to find working taps for all chips.')
+        return 
 
-    def alignLineClock(self, chips_lanes=None, ker_size=5):
-        """Find a tap for the line clock that produces reliable bit
-        capture from ADC."""
-        if chips_lanes is None:
-            chips_lanes = {chip:self.laneList for chip in self.adcList}
-        self.logger.info('Aligning line clock on ADCs/lanes: %s' % \
-                          str(chips_lanes))
-        try:
-            self._find_working_taps(ker_size=ker_size)
-        except(RuntimeError):
-            self.logger.info('Failed to find working taps.')
-            return chips_lanes # total failure
-        self.setDemux(numChannel=1)
-        for chip, lanes in chips_lanes.items():
-            self.selectADC(chip)
-            taps = self.working_taps[chip]
-            tap = random.choice(taps)
-            for L in self.laneList: # redo all lanes to be the same
-                self.delay(tap, chip, L)
-            # Remove from future consideration if tap doesn't work out
-            self.working_taps[chip] = taps[np.abs(taps - tap) >= ker_size//2]
-            self.logger.info('Setting ADC=%d tap=%s' % (chip, tap))
-        self.setDemux(numChannel=self.numChannel)
-        return {} # success
+    #def align_line_clock(self, chips_lanes=None, ker_size=5):
+    #    """Find a tap for the line clock that produces reliable bit
+    #    capture from ADC."""
+    #    if chips_lanes is None:
+    #        chips_lanes = {chip:self.laneList for chip in self.adcList}
+    #    self.logger.info('Aligning line clock on ADCs/lanes: %s' % \
+    #                      str(chips_lanes))
+    #    try:
+    #        self._find_working_taps(ker_size=ker_size, chips=list(chips_lanes.keys()), maxtries=1)
+    #    except(RuntimeError):
+    #        self.logger.info('Failed to find working taps.')
+    #        return chips_lanes # total failure
+    #    self.setDemux(numChannel=1)
+    #    for chip, lanes in chips_lanes.items():
+    #        self.selectADC(chip)
+    #        taps = self.working_taps[chip]
+    #        tap = random.choice(taps)
+    #        for L in self.laneList: # redo all lanes to be the same
+    #            self.delay(tap, chip, L)
+    #        # Remove from future consideration if tap doesn't work out
+    #        self.working_taps[chip] = taps[np.abs(taps - tap) >= ker_size//2] # I would not remove it now... 
+    #        self.logger.info('Setting ADC=%d tap=%s' % (chip, tap))
+    #    self.setDemux(numChannel=self.numChannel)
+    #    return {} # success
 
-    def isLineClockAligned(self):
-        errs = self.test_patterns(mode='std',pattern1=self.p1,pattern2=self.p2)
+    #def isLineClockAligned(self):
+    #    errs = self.test_patterns(mode='std',pattern1=self.p1,pattern2=self.p2)
 
-        if np.all(np.array([list(adc.values()) for adc in errs.values()])==0):
-            logger.info('Line clock of all ADCs aligned.')
-            return True
-        else:
-            logger.error('Line clock NOT aligned.\n{0}'.format(str(errs)))
-            return False
+    #    if np.all(np.array([list(adc.values()) for adc in errs.values()])==0):
+    #        logger.info('Line clock of all ADCs aligned.')
+    #        return True
+    #    else:
+    #        logger.error('Line clock NOT aligned.\n{0}'.format(str(errs)))
+    #        return False
 
-    def _int_to_binary(self, n, bits=12): # for debug only
+    def _get_offset_binary_bits(self, n:int):
+        """Returns a string of the binary digits."""
         if n<0:
-            n=(1 << bits) + n # two's compliment signed int
-        binary_representation = f'{n:0{bits}b}'
-        return binary_representation 
+            n=(1 << self.resolution) + n
+        binrep=f'{n:0{self.resolution}b}' # This is what it would be in two's complement
+        binrep_offset= '1'+binrep[1:] if binrep[0]=='0' else '0'+binrep[1:]
+        return binrep_offset
+    def align_frame_clock(self, chips_taps, chips_lanes=None):
+        """Align the frame clocks within each chip.
+        
+        chips_taps : dict
+            E.g. {0:22, 2:13}, specifies which tap should be used for each chip.
+        chips_lanes : dict
+            E.g. {0:[0,1,2,3,4,5,6,7], 2:[0,1,2,3,4,5,6,7]}, specifies which lanes should be used for each chip.
+        """
+        if chips_lanes is None:
+            chips_lanes = {chip:self.laneList for chip in chips_taps.keys()}
+        if self.resolution==8:
+            pattern1 = "10101111"
+            pattern1 = "01010000"
+        elif self.resolution==12:
+            pattern1 = "1010_1011_1111_0000".replace("_","") # Last four bigits don't count
+            pattern2 = "0101_0100_0000_1111".replace("_","") # Last four bigits don't count
+        else:
+            raise NotImplementedError(f"Only implemented for resolutions 8, 12, not {self.resolution}")
+        for chip, tap in chips_taps.items():
+            self.selectADC(chip)
+            lanes = chips_lanes[chip]
+            self.adc.test('dual_custom_pat',eval(f'0b{pattern1}'),eval(f'0b{pattern2}'))
+            self.snapshot()
+            snapshot_bram = self.readRAM(chip)
+            # First, assume that all the lanes are aligned with each other, 
+            # this saves time on average
+            max_slips = 32 # Not sure what period bitslip routine is, assuming it's under 32
+            for nslip in range(max_slips): 
+                self.logger.debug(f"chip={chip}, nslip={nslip}, tap={tap}, bram[{lanes[0]},0]={snapshot_bram[lanes[0],0]}")
+                offset_binary_lane0 = self._get_offset_binary_bits(snapshot_bram[lanes[0],0])
+                if offset_binary_lane0 in (pattern1[:self.resolution], pattern2[:self.resolution]):
+                    break
+                else:
+                    self.bitslip(chipSel=chip, laneSel=lanes)
+                    self.snapshot()
+                    snapshot_bram = self.readRAM(chip)
+                if nslip==max_slips-1:
+                    raise RuntimeError(f"Could not align frame clock for chip {chip}")
+            # Now align all lanes, start at 1 because lane 0 is already aligned
+            # Also, need to align wrt the first lane we aligned lanes[0]
+            for lane in lanes[1:]:
+                for nslip in range(max_slips):
+                    self.logger.debug(f"chip={chip}, lane={lane}, nslip={nslip}, tap={tap}, bram[{lane},0]={snapshot_bram[lane,0]}")
+                    offset_binary_lane0 = self._get_offset_binary_bits(snapshot_bram[lanes[0],0])
+                    offset_binary_laneX = self._get_offset_binary_bits(snapshot_bram[lane,0])
+                    if offset_binary_laneX == offset_binary_lane0:
+                        break
+                    else:
+                        self.bitslip(chipSel=chip, laneSel=lane)
+                        self.snapshot()
+                        snapshot_bram = self.readRAM(chip)
+                    if nslip==max_slips-1:
+                        raise RuntimeError(f"Could not align frame clock for chip {chip}")
+                pass
+        return 
+    #def alignFrameClock(self, chips_lanes=None, retry=True):
+    #    """Align frame clock with data frame."""
+    #    if chips_lanes is None:
+    #        chips_lanes = {chip:self.laneList for chip in self.adcList}
+    #    self.logger.debug('Aligning frame clock on ADCs/lanes: %s' % \
+    #                      str(chips_lanes))
+    #    failed_chips = {}
+    #    self.setDemux(numChannel=1)
+    #    for chip, lanes in chips_lanes.items():
+    #        self.selectADC(chip)
+    #        self.adc.test('dual_custom_pat', self.p1, self.p2)
+    #        ans1 = self._signed(self.p1, self.resolution)
+    #        ans2 = self._signed(self.p2, self.resolution)
+    #        failed_lanes = []
+    #        nbitslip = 16 if self.resolution==8 else 32
+    #        for cnt in range(nbitslip):
+    #            slipped = False
+    #            self.snapshot() # make bitslip "take" (?!) XXX
+    #            d = self.readRAM(chip)
+    #            # sanity check: these failures mean line clock errors
+    #            failed_lanes += [L for L in lanes
+    #                    if np.any(d[0::2,L] != d[0,L]) or \
+    #                       np.any(d[1::2,L] != d[1,L])]
+    #            lanes = [L for L in lanes if L not in failed_lanes]
+    #            for lane in lanes:
+    #                if not (d[0,lane] in (ans1, ans2) and d[1,lane] in (ans1, ans2)):
+    #                    if cnt == nbitslip - 1:
+    #                        # Failed on last try
+    #                        failed_lanes += [lane]
+    #                    self.bitslip(chip, lane)
+    #                    slipped = True
+    #            if not slipped:
+    #                break
+    #        self.adc.test('off')
+    #        if len(failed_lanes) > 0:
+    #            failed_chips[chip] = failed_lanes
+    #    self.setDemux(numChannel=self.numChannel)
+    #    if len(failed_chips) > 0 and retry:
+    #        if self._retry_cnt < self._retry:
+    #            self._retry_cnt += 1
+    #            self.logger.info('retry=%d/%d redo Line on ADCs/lanes: %s' % \
+    #                        (self._retry_cnt, self._retry, failed_chips))
+    #            self.align_line_clock(failed_chips)
+    #            return self.alignFrameClock(failed_chips)
+    #    return failed_chips
 
-    def alignFrameClock(self, chips_lanes=None, retry=True):
-        """Align frame clock with data frame."""
+    #def isFrameClockAligned(self):
+    #    errs = self.test_patterns(mode='err',pattern1=self.p1,pattern2=self.p2)
+    #    if all(all(val==0 for val in adc.values()) for adc in errs.values()):
+    #        logger.info('Frame clock of all ADCs aligned.')
+    #        return True
+    #    else:
+    #        logger.error('Frame clock NOT aligned.\n{0}'.format(str(errs)))
+    #        return False
+
+    def ramp_test(self, chips_lanes=None, nchecks=10):
+        """Ramp test on ADCs/lanes."""
         if chips_lanes is None:
             chips_lanes = {chip:self.laneList for chip in self.adcList}
-        self.logger.debug('Aligning frame clock on ADCs/lanes: %s' % \
-                          str(chips_lanes))
-        failed_chips = {}
-        self.setDemux(numChannel=1)
-        for chip, lanes in chips_lanes.items():
-            self.selectADC(chip)
-            self.adc.test('dual_custom_pat', self.p1, self.p2)
-            ans1 = self._signed(self.p1, self.resolution)
-            ans2 = self._signed(self.p2, self.resolution)
-            self.logger.debug(f'ans1 {self._int_to_binary(ans1,12)}')
-            self.logger.debug(f'ans2 {self._int_to_binary(ans2,12)}')
-            failed_lanes = []
-            nbitslip = 16 if self.resolution==8 else 32
-            for cnt in range(nbitslip):
-                slipped = False
-                self.snapshot() # make bitslip "take" (?!) XXX
-                d = self.readRAM(chip)
-                # sanity check: these failures mean line clock errors
-                failed_lanes += [L for L in lanes
-                        if np.any(d[0::2,L] != d[0,L]) or \
-                           np.any(d[1::2,L] != d[1,L])]
-                lanes = [L for L in lanes if L not in failed_lanes]
-                for lane in lanes:
-                    if not (d[0,lane] in (ans1, ans2) and d[1,lane] in (ans1, ans2)):
-                        if cnt == nbitslip - 1:
-                            # Failed on last try
-                            failed_lanes += [lane]
-                        self.bitslip(chip, lane)
-                        slipped = True
-                if not slipped:
-                    break
-            self.adc.test('off')
-            if len(failed_lanes) > 0:
-                failed_chips[chip] = failed_lanes
-        self.setDemux(numChannel=self.numChannel)
-        if len(failed_chips) > 0 and retry:
-            if self._retry_cnt < self._retry:
-                self._retry_cnt += 1
-                self.logger.info('retry=%d/%d redo Line on ADCs/lanes: %s' % \
-                            (self._retry_cnt, self._retry, failed_chips))
-                self.alignLineClock(failed_chips)
-                return self.alignFrameClock(failed_chips)
-        return failed_chips
-
-    def isFrameClockAligned(self):
-        errs = self.test_patterns(mode='err',pattern1=self.p1,pattern2=self.p2)
-
-        if all(all(val==0 for val in adc.values()) for adc in errs.values()):
-            logger.info('Frame clock of all ADCs aligned.')
-            return True
-        else:
-            logger.error('Frame clock NOT aligned.\n{0}'.format(str(errs)))
-            return False
-
-    def rampTest(self, nchecks=300, retry=False):
-        chips = self.adcList
-        self.logger.debug('Ramp test on ADCs: %s' % str(chips))
-        failed_chips = {}
-        self.setDemux(numChannel=1)
-        predicted = np.arange(128).reshape(-1,1)
-        self.selectADC() # select all chips
-        self.adc.test("en_ramp")
-        for cnt in range(nchecks):
+        self.selectADC(list(chips_lanes.keys()))
+        self.adc.test('en_ramp')
+        for _ in range(nchecks):
             self.snapshot()
-            for chip,d in self.readRAM(signed=False).items():
-                ans = (predicted + d[0,0]) % 256
-                failed_lanes = np.sum(d != ans, axis=0)
-                if np.any(failed_lanes) > 0:
-                    failed_chips[chip] = np.where(failed_lanes)[0]
-            if (retry is False) and len(failed_chips) > 0:
-                # can bail out if we aren't retrying b/c we don't need list of failures.
-                break
-        self.selectADC() # select all chips
-        self.adc.test('off')
-        self.setDemux(numChannel=self.numChannel)
-        if len(failed_chips) > 0 and retry:
-            if self._retry_cnt < self._retry:
-                self._retry_cnt += 1
-                self.logger.info('retry=%d/%d redo Line/Frame on ADCs/lanes: %s' % \
-                            (self._retry_cnt, self._retry, failed_chips))
-                self.alignLineClock(failed_chips)
-                self.alignFrameClock(failed_chips)
-                return self.rampTest(nchecks=nchecks, retry=retry)
-        return failed_chips
+            for chip,lanes in chips_lanes.items():
+                snapshot_bram = self.readRAM(chip)
+                bram_lane0 = snapshot_bram[:,lanes[0]]
+                i0 = bram_lane0[0]
+                halfspan = 1 << (self.resolution-1)
+                span = 1 << self.resolution # 4096 in 12-bit, 256 in 8-bit 
+                bram_expected_lane = ((np.arange(i0,i0+len(bram_lane0)) + halfspan) % span) - halfspan
+                if not (snapshot_bram.T == bram_expected_lane).all():
+                    self.logger.warning(f"Ramp test failed on chip {chip}, lanes {lanes}")
+                    return False
+        return True
+
+    #def rampTest(self, nchecks=300, retry=False):
+    #    chips = self.adcList
+    #    self.logger.debug('Ramp test on ADCs: %s' % str(chips))
+    #    failed_chips = {}
+    #    self.setDemux(numChannel=1)
+    #    predicted = np.arange(128).reshape(-1,1)
+    #    self.selectADC() # select all chips
+    #    self.adc.test("en_ramp")
+    #    for cnt in range(nchecks):
+    #        self.snapshot()
+    #        for chip,d in self.readRAM(signed=False).items():
+    #            ans = (predicted + d[0,0]) % 256
+    #            failed_lanes = np.sum(d != ans, axis=0)
+    #            if np.any(failed_lanes) > 0:
+    #                failed_chips[chip] = np.where(failed_lanes)[0]
+    #        if (retry is False) and len(failed_chips) > 0:
+    #            # can bail out if we aren't retrying b/c we don't need list of failures.
+    #            break
+    #    self.selectADC() # select all chips
+    #    self.adc.test('off')
+    #    self.setDemux(numChannel=self.numChannel)
+    #    if len(failed_chips) > 0 and retry:
+    #        if self._retry_cnt < self._retry:
+    #            self._retry_cnt += 1
+    #            self.logger.info('retry=%d/%d redo Line/Frame on ADCs/lanes: %s' % \
+    #                        (self._retry_cnt, self._retry, failed_chips))
+    #            self.align_line_clock(failed_chips)
+    #            self.alignFrameClock(failed_chips)
+    #            return self.rampTest(nchecks=nchecks, retry=retry)
+    #    return failed_chips
 
     def isLaneBonded(self, bondAllAdcs=False):
         """
