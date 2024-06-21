@@ -9,7 +9,7 @@ import numpy as np
 import time
 import random
 #print(__version__)
-
+ 
 # There are so many I2C warnings that a new level is defined
 # to filter them out
 I2CWARNING = logging.INFO - 5
@@ -51,6 +51,16 @@ class SnapAdc(object):
     M_WB_W_DELAY_TAP        = 0b11111 << 0
     M_WB_W_ISERDES_BITSLIP_CHIP_SEL = 0b11111111 << 8
     M_WB_W_ISERDES_BITSLIP_LANE_SEL = 0b111 << 5
+    BITSLIP_LANE_CODES = {
+        0 : 0b000,
+        1 : 0b010,
+        2 : 0b100,
+        3 : 0b110,
+        4 : 0b001,
+        5 : 0b011,
+        6 : 0b101,
+        7 : 0b111,
+    }
 
     SUCCESS = 0
     ERROR_LMX = 1
@@ -267,8 +277,10 @@ class SnapAdc(object):
 
         self.logger.debug("Configuring ADC operating mode")
         if type(self.adc) is HMCAD1511:
+            self.logger.debug("ADC operating mode uses HMCAD1511 (8bit)")
             self.adc.setOperatingMode(numChannel, 1, lowClkFreq)
         elif type(self.adc) is HMCAD1520:
+            self.logger.debug(f"ADC operating mode uses HMCAD1520 ({self.resolution}bit)")
             self.adc.setOperatingMode(numChannel, 1, lowClkFreq,
                                       self.resolution)
 
@@ -467,8 +479,9 @@ class SnapAdc(object):
         """ Reorder the parallelize data for word-alignment purpose
         
         Reorder the parallelized data by asserting a itslip command to the bitslip 
-        submodule of a ISERDES primitive.  Each bitslip command left shift the 
-        parallelized data by one bit.
+        submodule of a ISERDES primitive. Each bitslip command shifts the 
+        parallelized data in an alternating pattern: now left by one bit, 
+        now right by three.
 
         HMCAD1511/HMCAD1520 lane correspondence
         lane number lane name in ADC datasheet
@@ -489,7 +502,6 @@ class SnapAdc(object):
             bitslip([0,1],[3,4])    # shift the 4th and 5th lanes of the 1st
                         # and the 2nd ADCs
         """
-
         if chipSel == None:
             chipSel = self.adcList
         elif chipSel in self.adcList:
@@ -507,15 +519,16 @@ class SnapAdc(object):
 
         if not isinstance(laneSel,list):
             raise ValueError("Invalid parameter")
-        elif isinstance(laneSel,list) and any(cs not in self.laneList for cs in laneSel):
+        elif isinstance(laneSel,list) and any(ls not in self.laneList for ls in laneSel):
             raise ValueError("Invalid parameter")
 
-        logger.debug('Bitslip lane {0} of chip {1}'.format(str(laneSel),str(chipSel)))
+        #logger.debug('Bitslip lane {0} of chip {1}'.format(str(laneSel),str(chipSel)))
 
         for cs in chipSel:
             for ls in laneSel:
+                lane_code = self.BITSLIP_LANE_CODES[ls]
                 val = self._set(0x0, 0b1 << cs, self.M_WB_W_ISERDES_BITSLIP_CHIP_SEL)
-                val = self._set(val, ls, self.M_WB_W_ISERDES_BITSLIP_LANE_SEL)
+                val = self._set(val, lane_code, self.M_WB_W_ISERDES_BITSLIP_LANE_SEL)
         
                 # The registers related to reset, request, bitslip, and other
                 # commands after being set will not be automatically cleared.  
