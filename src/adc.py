@@ -2,8 +2,7 @@ from .wishbonedevice import WishBoneDevice
 import numpy as np
 import struct,math
 import logging
-
-
+ 
 class HMCAD1511(WishBoneDevice):
 
     # HMCAD1511 does not provide any way of register readback for
@@ -65,8 +64,8 @@ class HMCAD1511(WishBoneDevice):
             'cgain2_ch2' : 0b1111 << 4,
             'cgain1_ch1' : 0b1111 << 8, }
     DICT[0x30] = {  'jitter_ctrl' : 0b11111111 << 0, }
-    DICT[0x31] = {  'channel_num' : 0b111 << 0,
-            'clk_divide' : 0b11 << 8, }
+    DICT[0x31] = {  'channel_num' : 0b111 << 0, # Enable high speed mode -- single, dual, or quad channel
+            'clk_divide' : 0b11 << 8, } # Define clock divider factor 1,2,3,8
     DICT[0x33] = {  'cgain_cfg' : 0b1 << 0,
             'fine_gain_en' : 0b1 << 1, }
     DICT[0x34] = {  'fgain_branch1' : 0b1111111 << 0,
@@ -172,7 +171,6 @@ class HMCAD1511(WishBoneDevice):
             raise ValueError("Invalid parameter")
         self.cs = cs & 0xff
 
-
     # Put some initialization here rather than in __init__ so that instantiate
     # an HMCAD1511 object wouldn't reset/interrupt the running ADCs.
     def init(self,numChannel=4,clkDivide=1,lowClkFreq=False):
@@ -250,9 +248,9 @@ class HMCAD1511(WishBoneDevice):
         """
 
         if mode == 'en_ramp':
-            rid, mask = self._getMask('pat_deskew')
+            rid, mask = self._getMask('pat_deskew') # disable this one
             self.write(self._set(0x0, 0b00, mask), rid)
-            rid, mask = self._getMask(mode)
+            rid, mask = self._getMask(mode) # enable this one
             self.write(self._set(0x0, 0b100, mask), rid)
         elif mode == 'dual_custom_pat':
             if not isinstance(_bits_custom1, int) or not isinstance(_bits_custom2, int):
@@ -629,7 +627,7 @@ class HMCAD1520(HMCAD1511):
         val = self._set(0x0, width, mask)
         rid, mask = self._getMask('low_clk_freq')
         val = self._set(val, lowClkFreq, mask)
-        self.write(val, rid)
+        self.write(val, rid) # value, register-ID
 
         rid, mask = self._getMask('high_speed_mode')
         val = self._set(0x0, numChannel, mask)
