@@ -506,6 +506,8 @@ class HMCAD1511(WishBoneDevice):
         E.g.
             selectInput([1,2,3,4])  (in four channel mode)
             selectInput([1,1,1,1])  (in one channel mode)
+
+            selectInput([1,1,4,4]) (in two channel mode, I assume)
         """
 
         opts = [1, 2, 3, 4]

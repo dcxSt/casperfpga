@@ -317,33 +317,33 @@ class SnapAdc(object):
         self.selected_taps = {} # keys are chips (0, 1, or 2), values are ints within working_taps dict
         return
 
-    def calibrate_ADCs(self, adc_chip_sel=[0,1,2], ker_size=5):
+    def calibrate_ADCs(self, chips_lanes=None, ker_size=5):
         """
         Calibrate specified ADCs
 
-        adc_chip_sel : int or tuple, Select which ADC chip(s) to callibrate
-            chips must be in (0,1,2) or a subset thereof
+        chips_lanes : dict, keys are ADC chips (0, 1, 2), values are lists of lanes (0-7)
         """
-        if isinstance(adc_chip_sel, int):
-            adc_chip_sel = [adc_chip_sel]
-        elif not set(adc_chip_sel).issubset({0,1,2}):
-            raise ValueError("Invalid ADC chip selection")
+        if chips_lanes is None:
+            chips_lanes = {i:self.laneList for i in self.adcList} # Select all lanes of all ADCs
         self.setDemux(numChannel=1) # Temporarily set to 1, full interleave mode
-        self.logger.info('ADC Calibration Stage 1: Align bit/line-clock')
-        self._find_working_taps(self, ker_size=ker_size, adc_chip_sel=adc_chip_sel, maxtries=1) # populate self.working_taps
+
+        self.logger.info(f'ADC Calibration Stage 1: Align bit/line-clock for chips {list(chips_lanes.keys())}...')
+        self._find_working_taps(ker_size=ker_size, adc_chip_sel=list(chips_lanes.keys()), maxtries=1) # populate self.working_taps
         # Alert the user of any defective chips
-        for chip in (0,1,2):
+        for chip in chips_lanes.keys():
             if len(self.working_taps[chip])==0:
                 self.logger.warning(f'No working taps found for chip {chip}')
+            else:
+                self.logger.info(f'Chip {chip} has working taps: {self.working_taps[chip]}.')
         # Pick taps at random of the ones that passed the test, only for adc_chip_sel
-        self.selected_taps = {chip:int(np.random.choice(self.working_taps[chip])) for chip in adc_chip_sel}
-
-        self.logger.info('ADC Calibration Stage 2: Align word/frame-clock')
-        self.align_frame_clock()
-
-        self.logger.info('ADC Calibration Stage 3: Ramp test')
-        self.ramp_test() # TODO: write this method
-
+        self.selected_taps = {chip:int(np.random.choice(self.working_taps[chip])) for chip in chips_lanes.keys()}
+        self.logger.info(f'ADC Calibration Stage 2: Align Word/Frame-Clock for chips {list(chips_lanes.keys())}...')
+        self.align_frame_clock(chips_lanes=chips_lanes) # Align the Frame/Word-clock 
+        self.logger.info(f'ADC Calibration Stage 3: Ramp testing chips {list(chips_lanes.keys())}...')
+        if self.ramp_test(chips_lanes=chips_lanes) is True: # Perform ramp pattern checks
+            self.logger.info("Ramp test passed.")
+        self.setDemux(numChannel=self.numChannel) # Reset demux to operational mode
+        self.logger.info('ADC Calibration done.')
         return 
 
     #def ADC_calibration(self):
@@ -416,7 +416,7 @@ class SnapAdc(object):
 
     def snapshot(self):
         """ Save 1024 consecutive samples of each ADC into its corresponding bram """
-        # No way to snapshot a single ADC because the HDL code is designed so
+        # No way to snapshot a single ADC because the HDL code is designed so.
         val = self._set(0x0, 0x1, self.M_WB_W_SNAP_REQ)
         self.adc._write(0x0, self.A_WB_W_CTRL)
         self.adc._write(val, self.A_WB_W_CTRL)
@@ -930,7 +930,7 @@ class SnapAdc(object):
         return np.argmax(dist)
 
     def _find_working_taps(self, ker_size=5, adc_chip_sel=[0,1,2], maxtries=1):
-        '''Generate a dictionary of working tap values per chip/lane.
+        """Generate a dictionary of working tap values per chip/lane.
         Populates self.working_taps with taps that are able to capture patterns reliably; 
         the keys are chip numbers (0,1,2), the values are numpy arrays of taps. 
 
@@ -938,7 +938,7 @@ class SnapAdc(object):
 
         ker: size of convolutional kernel used as a stand-off from
              marginal tap values. Default 7.
-        '''
+        """
         nchips, ntaps = len(self.adcList), 32 # steve: what is this magic number 32 about? Answer: there are 32 taps with monotonically incereasing sub-clock delays between them.
         # Make sure we have enough taps to work with, otherwise reinit ADC
         for _ in range(maxtries):
@@ -947,7 +947,7 @@ class SnapAdc(object):
                     assert(self.working_taps[chip].size > 0)
                 return
             except(KeyError, AssertionError):
-                self.logger.info('Not enough working taps. Reinitializing.')
+                self.logger.info('Not enough working taps. (Re)initializing.')
                 if len(self.working_taps) > 0:
                     self.init()
                 self.working_taps = {}
@@ -957,7 +957,7 @@ class SnapAdc(object):
                 self.adc.test('pat_deskew')
                 for t in range(ntaps):
                     for L in self.laneList:
-                        for chip in self.adcList:
+                        for chip in adc_chip_sel: #self.adcList:
                             self.delay(t, chip, L)
                     self.snapshot() # save 1024 ADC samples bram
                     for chip,d in self.readRAM(signed=False).items():
@@ -969,11 +969,13 @@ class SnapAdc(object):
                 self.adc.test('off')
                 self.setDemux(numChannel=self.numChannel)
                 ker = np.ones(ker_size)
-                for chip in self.adcList:
+                for chip in adc_chip_sel: 
                     # identify taps that work for all lanes of chip
                     taps = np.where(np.convolve(h[chip], ker, 'same') == ker_size)[0]
                     self.working_taps[chip] = taps
-        self.logger.error('Failed to find working taps for all chips.')
+        for chip in adc_chip_sel:
+            if self.working_taps[chip].size == 0:
+                self.logger.error(f"Failed to find working taps for ADC-chip #{chip}")
         return 
 
     #def align_line_clock(self, chips_lanes=None, ker_size=5):
@@ -1012,32 +1014,43 @@ class SnapAdc(object):
     #        return False
 
     def _get_offset_binary_bits(self, n:int):
-        """Returns a string of the binary digits."""
+        """Converts between ints and offset binary representation. 
+        
+        n : int
+            The number to be converted to a binary string.
+        
+        Returns a string of 1s and 0s, with the first digit being the sign bit.
+        The sign bit is inverted for negative numbers. The remaining bits are the
+        same as the binary representation of the absolute value of the number.
+        This method only works for numbers that can be represented in self.resolution bits."""
         if n<0:
             n=(1 << self.resolution) + n
         binrep=f'{n:0{self.resolution}b}' # This is what it would be in two's complement
         binrep_offset= '1'+binrep[1:] if binrep[0]=='0' else '0'+binrep[1:]
         return binrep_offset
-    def align_frame_clock(self, chips_taps, chips_lanes=None):
+
+    def align_frame_clock(self, chips_lanes=None):
         """Align the frame clocks within each chip.
         
-        chips_taps : dict
-            E.g. {0:22, 2:13}, specifies which tap should be used for each chip.
         chips_lanes : dict
+            By default, None aligns all lanes in chips specified in self.selected_taps dictionary.
             E.g. {0:[0,1,2,3,4,5,6,7], 2:[0,1,2,3,4,5,6,7]}, specifies which lanes should be used for each chip.
         """
+        assert self.selected_taps != {}, "You must select taps before aligning the frame clock."
         if chips_lanes is None:
-            chips_lanes = {chip:self.laneList for chip in chips_taps.keys()}
+            # Default to all chips, all lanes
+            chips_lanes = {chip:self.laneList for chip in self.selected_taps.keys()} 
         if self.resolution==8:
-            pattern1 = "10101111"
-            pattern1 = "01010000"
+            pattern1 = "10110000" # "10101111"
+            pattern2 = "01001111" # "01010000"
         elif self.resolution==12:
             pattern1 = "1010_1011_1111_0000".replace("_","") # Last four bigits don't count
             pattern2 = "0101_0100_0000_1111".replace("_","") # Last four bigits don't count
         else:
             raise NotImplementedError(f"Only implemented for resolutions 8, 12, not {self.resolution}")
-        for chip, tap in chips_taps.items():
+        for chip, tap in self.selected_taps.items():
             self.selectADC(chip)
+            self.delay(tap=tap, chipSel=chip, laneSel=None)
             lanes = chips_lanes[chip]
             self.adc.test('dual_custom_pat',eval(f'0b{pattern1}'),eval(f'0b{pattern2}'))
             self.snapshot()
@@ -1046,8 +1059,8 @@ class SnapAdc(object):
             # this saves time on average
             max_slips = 32 # Not sure what period bitslip routine is, assuming it's under 32
             for nslip in range(max_slips): 
-                self.logger.debug(f"chip={chip}, nslip={nslip}, tap={tap}, bram[{lanes[0]},0]={snapshot_bram[lanes[0],0]}")
-                offset_binary_lane0 = self._get_offset_binary_bits(snapshot_bram[lanes[0],0])
+                self.logger.debug(f"chip={chip}, lane={lanes[0]}, nslip={nslip}, tap={tap}, bram[{lanes[0]},0]={self._get_offset_binary_bits(snapshot_bram[0,lanes[0]])}")
+                offset_binary_lane0 = self._get_offset_binary_bits(snapshot_bram[0,lanes[0]])
                 if offset_binary_lane0 in (pattern1[:self.resolution], pattern2[:self.resolution]):
                     break
                 else:
@@ -1060,9 +1073,9 @@ class SnapAdc(object):
             # Also, need to align wrt the first lane we aligned lanes[0]
             for lane in lanes[1:]:
                 for nslip in range(max_slips):
-                    self.logger.debug(f"chip={chip}, lane={lane}, nslip={nslip}, tap={tap}, bram[{lane},0]={snapshot_bram[lane,0]}")
-                    offset_binary_lane0 = self._get_offset_binary_bits(snapshot_bram[lanes[0],0])
-                    offset_binary_laneX = self._get_offset_binary_bits(snapshot_bram[lane,0])
+                    offset_binary_lane0 = self._get_offset_binary_bits(snapshot_bram[0,lanes[0]])
+                    offset_binary_laneX = self._get_offset_binary_bits(snapshot_bram[0,lane])
+                    self.logger.debug(f"chip={chip}, lane={lane}, nslip={nslip}, tap={tap}, bram[0,{lane}]={offset_binary_laneX}, bram[0,0]={offset_binary_lane0}")
                     if offset_binary_laneX == offset_binary_lane0:
                         break
                     else:
@@ -1070,8 +1083,8 @@ class SnapAdc(object):
                         self.snapshot()
                         snapshot_bram = self.readRAM(chip)
                     if nslip==max_slips-1:
-                        raise RuntimeError(f"Could not align frame clock for chip {chip}")
-                pass
+                        raise RuntimeError(f"Could not align frame clock for chip {chip}, maximum number of bitslips exceeded {max_slips}")
+            self.logger.info(f"Word data aligned with Word-Clock for chip {chip}")
         return 
     #def alignFrameClock(self, chips_lanes=None, retry=True):
     #    """Align frame clock with data frame."""
@@ -1129,7 +1142,21 @@ class SnapAdc(object):
     #        return False
 
     def ramp_test(self, chips_lanes=None, nchecks=10):
-        """Ramp test on ADCs/lanes."""
+        """Ramp test on ADCs/lanes.
+
+        The ramp test loads a ramp pattern into the ADCs and checks that all
+        lanes within a chip output the ramp pattern (aligned with each other).
+        This method subjects specified chips and lanes to the ramp test.
+        
+        chips_lanes : dict
+            With chip-ids as keys and lanes to test as values.
+
+        nchecks : int
+            Number of times execute the ramp test.
+
+        returns : bool
+            True if all lanes pass the test
+        """
         if chips_lanes is None:
             chips_lanes = {chip:self.laneList for chip in self.adcList}
         self.selectADC(list(chips_lanes.keys()))
