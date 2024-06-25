@@ -317,7 +317,7 @@ class SnapAdc(object):
         self.selected_taps = {} # keys are chips (0, 1, or 2), values are ints within working_taps dict
         return
 
-    def calibrate_ADCs(self, chips_lanes=None, ker_size=5):
+    def calibrate_ADCs(self, chips_lanes=None, ker_size=5, n_ramp_tests=10):
         """
         Calibrate specified ADCs
 
@@ -337,10 +337,11 @@ class SnapAdc(object):
                 self.logger.info(f'Chip {chip} has working taps: {self.working_taps[chip]}.')
         # Pick taps at random of the ones that passed the test, only for adc_chip_sel
         self.selected_taps = {chip:int(np.random.choice(self.working_taps[chip])) for chip in chips_lanes.keys()}
+        self.logger.info(f'Selected taps are chip:tap = {self.selected_taps}')
         self.logger.info(f'ADC Calibration Stage 2: Align Word/Frame-Clock for chips {list(chips_lanes.keys())}...')
         self.align_frame_clock(chips_lanes=chips_lanes) # Align the Frame/Word-clock 
-        self.logger.info(f'ADC Calibration Stage 3: Ramp testing chips {list(chips_lanes.keys())}...')
-        if self.ramp_test(chips_lanes=chips_lanes) is True: # Perform ramp pattern checks
+        self.logger.info(f'ADC Calibration Stage 3: Ramp testing chips {list(chips_lanes.keys())} (x{n_ramp_tests})...')
+        if self.ramp_test(chips_lanes=chips_lanes, nchecks=n_ramp_tests) is True: # Perform ramp pattern checks
             self.logger.info("Ramp test passed.")
         self.setDemux(numChannel=self.numChannel) # Reset demux to operational mode
         self.logger.info('ADC Calibration done.')
