@@ -344,6 +344,7 @@ class SnapAdc(object):
         if self.ramp_test(chips_lanes=chips_lanes, nchecks=n_ramp_tests) is True: # Perform ramp pattern checks
             self.logger.info("Ramp test passed.")
         self.setDemux(numChannel=self.numChannel) # Reset demux to operational mode
+        self.adc.test('off') # put it back into normal mode
         self.logger.info('ADC Calibration done.')
         return 
 
